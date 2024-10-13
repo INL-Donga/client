@@ -20,3 +20,7 @@ import matplotlib.pyplot as plt
 from PIL import Image
 
 import IPython
+
+
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+print(device)
