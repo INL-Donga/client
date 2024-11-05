@@ -140,7 +140,9 @@ def log_message(message):
     print(f"[{current_time}] {message}")
 
 
-server_address = ('127.0.0.1', 9090)
+server_address = (os.getenv('SERVER_ADDRESS', '127.0.0.1'),
+                  int(os.getenv('SERVER_PORT', '9090')))
+
 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 s.connect(server_address)
 
