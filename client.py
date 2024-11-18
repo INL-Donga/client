@@ -7,10 +7,21 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 from datetime import datetime
+import time
+# from torch.utils.tensorboard import SummaryWriter
+
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 print(device)
 
+SERVER_ADDRESS = os.getenv("SERVER_ADDRESS")
+SERVER_PORT = int(os.getenv("SERVER_PORT"))
+EPOCHS = int(os.getenv('EPOCHS'))
+
+if EPOCHS is None:
+    EPOCHS = 10
+
+# 데이터셋 로드
 train_dataset_CIFAR10 = datasets.CIFAR10(root='data',
                                          train=True,
                                          transform=transforms.ToTensor(),
@@ -27,6 +38,7 @@ test_loader_CIFAR10 = DataLoader(dataset=test_dataset_CIFAR10,
                                  shuffle=False)
 
 
+# ResNet18 모델 정의
 def conv3x3(in_planes, out_planes, stride=1):
     return nn.Conv2d(in_planes, out_planes, kernel_size=3, stride=stride, padding=1, bias=False)
 
@@ -114,123 +126,134 @@ def resnet18(num_classes, grayscale):
     return ResNet_18(block=BasicBlock_18, layers=[2, 2, 2, 2], num_classes=num_classes, grayscale=grayscale)
 
 
-criterion = nn.CrossEntropyLoss()
+class Client:
+    def __init__(self, server_address=(SERVER_ADDRESS, SERVER_PORT), max_retries=5, retry_interval=5):
+        self.server_address = server_address
+        self.s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.connect_with_retries(max_retries, retry_interval)
 
+    def connect_with_retries(self, max_retries, retry_interval):
+        retries = 0
+        while retries < max_retries:
+            try:
+                self.s.connect(self.server_address)
+                print("Connected to server.")
+                break
+            except ConnectionRefusedError:
+                retries += 1
+                print(
+                    f"Connection refused, retrying... ({retries}/{max_retries})")
+                time.sleep(retry_interval)
+        if retries == max_retries:
+            raise ConnectionError(
+                "Max retries exceeded, could not connect to the server.")
 
-def avg_train_client(id, client_loader, global_model, num_local_epochs, lr):
-    local_model = copy.deepcopy(global_model)
-    local_model = local_model.to(device)
-    local_model.train()
-    optimizer = torch.optim.SGD(local_model.parameters(), lr=lr, momentum=0.9)
-    for epoch in range(num_local_epochs):
-        print(f'    Epoch {epoch + 1}')
-        for (i, (x, y)) in enumerate(client_loader):
-            x = x.to(device)
-            y = y.to(device)
-            optimizer.zero_grad()
-            local_out, _ = local_model(x)
-            loss = criterion(local_out, y)
-            loss.backward()
-            optimizer.step()
-    return local_model
+    def log_message(self, message):
+        current_time = datetime.now().strftime("%M:%S.%f")[:-3]
+        print(f"[{current_time}] {message}")
 
+    def get_id(self):
+        data = self.s.recv(1024).decode('utf-8')
+        client_id = int(data)
+        self.log_message(f"client id : {client_id}")
+        return client_id
 
-def log_message(message):
-    current_time = datetime.now().strftime("%M:%S.%f")[:-3]
-    print(f"[{current_time}] {message}")
-
-
-server_address = (os.getenv('SERVER_ADDRESS', '127.0.0.1'),
-                  int(os.getenv('SERVER_PORT', '9090')))
-
-s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-s.connect(server_address)
-
-
-def getId():
-    data = s.recv(1024).decode('utf-8')
-    id = int(data)
-    log_message(f"client id : {id}")
-    return id
-
-
-def recvFile(fileName):
-    msg = s.recv(1024).decode('utf-8')
-    s.sendall("ack\n".encode('utf-8'))
-    if msg == "end":
+    def recv_file(self, file_name):
+        msg = self.s.recv(1024).decode('utf-8')
+        self.s.sendall("ack\n".encode('utf-8'))
+        if msg == "end":
+            return msg
+        with open(file_name, 'wb') as f:
+            file_size = int.from_bytes(self.s.recv(8), byteorder='big')
+            self.log_message(f"file size : {file_size}")
+            received_size = 0
+            while received_size < file_size:
+                data = self.s.recv(4096)
+                f.write(data)
+                received_size += len(data)
+        self.log_message(f"{file_name} received and saved")
         return msg
-    with open(fileName, 'wb') as f:
-        file_size = int.from_bytes(s.recv(8), byteorder='big')
-        log_message(f"file size : {file_size}")
-        received_size = 0
-        while received_size < file_size:
-            data = s.recv(4096)
-            f.write(data)
-            received_size += len(data)
-    log_message(f"{fileName} received and saved")
-    return msg
 
-
-def sendFile(fileName):
-    s.sendall("READY_TO_SEND_FILE\n".encode('utf-8'))
-    msg = s.recv(1024).decode('utf-8')
-    if msg == "ack":
-        with open(fileName, 'rb') as f:
-            file_size = os.path.getsize(fileName)
-            log_message(
-                f"Sending {fileName} to server, size : {file_size}bytes")
-            s.sendall(file_size.to_bytes(8, byteorder='big'))
-            data = f.read(4096)
-            while data:
-                s.sendall(data)
+    def send_file(self, file_name):
+        self.s.sendall("READY_TO_SEND_FILE\n".encode('utf-8'))
+        msg = self.s.recv(1024).decode('utf-8')
+        if msg == "ack":
+            with open(file_name, 'rb') as f:
+                file_size = os.path.getsize(file_name)
+                self.log_message(
+                    f"Sending {file_name} to server, size : {file_size}bytes")
+                self.s.sendall(file_size.to_bytes(8, byteorder='big'))
                 data = f.read(4096)
-        log_message(f"{fileName} sent to server")
+                while data:
+                    self.s.sendall(data)
+                    data = f.read(4096)
+            self.log_message(f"{file_name} sent to server")
 
+    def learn(self, client_id, round):
+        self.log_message("Start Learning")
+        model = resnet18(10, False)
+        model = torch.load('./global_model.pt')
+        model.to(device)
+        model.train()
+        optimizer = torch.optim.SGD(model.parameters(), lr=0.01)
 
-def Learning(id, round):
-    log_message("Start Learning")
-    model = resnet18(10, False)
-    model = torch.load('./global_model.pt')
-    model.to(device)
-    model.train()
-    optimizer = torch.optim.SGD(model.parameters(), lr=0.01)
-    for epoch in range(1):
-        for (i, (x, y)) in enumerate(train_loader_CIFAR10):
-            x = x.to(device)
-            y = y.to(device)
-            optimizer.zero_grad()
-            local_out, _ = model(x)
-            loss = criterion(local_out, y)
-            loss.backward()
-            optimizer.step()
-        log_message(f'Round {round}  Client {id} Training Success')
-    torch.save(model, f'client_model_{id}.pt')
-    log_message("End Learning")
+        # 학습 과정 모니터링을 위한 변수 초기화
+        total_loss = 0.0
+        total_correct = 0
+        total_samples = 0
 
+        for epoch in range(EPOCHS):
+            for i, (x, y) in enumerate(train_loader_CIFAR10):
+                x = x.to(device)
+                y = y.to(device)
+                optimizer.zero_grad()
+                local_out, _ = model(x)
+                loss = nn.CrossEntropyLoss()(local_out, y)
+                loss.backward()
+                optimizer.step()
 
-def getUpdatedPT(id, round):
-    msg = recvFile("global_model.pt")
-    if msg == "end":
-        return "end"
-    Learning(id, round)
-    sendFile(f"client_model_{id}.pt")
-    s.sendall("done learning\n".encode('utf-8'))
+                # 미니배치별 손실 출력
+                # print(
+                #     f"[Round {round} - Epoch {epoch + 1} - Batch {i + 1}] Loss: {loss.item():.4f}")
 
+                total_loss += loss.item() * x.size(0)
+                total_correct += (local_out.argmax(1) == y).sum().item()
+                total_samples += x.size(0)
 
-def run():
-    log_message("시작")
-    log_message(f"서버에 접속 중: {s.getpeername()}")
-    id = getId()
-    round = 1
-    while True:
-        log_message(f"Round {round} start")
-        t = getUpdatedPT(id, round)
-        round += 1
-        if t == "end":
-            log_message("종료 코드 수신")
-            s.sendall("end".encode('utf-8'))
-            break
+            # 에포크 종료 시 평균 손실 및 정확도 계산 및 출력
+            avg_loss = total_loss / total_samples
+            accuracy = total_correct / total_samples
+            print(
+                f"[Round {round} - Epoch {epoch + 1}] Avg Loss: {avg_loss:.4f}, Accuracy: {accuracy:.4f}")
+            self.log_message(
+                f'Round {round}  Client {client_id} Training Success - Avg Loss: {avg_loss:.4f}, Accuracy: {accuracy:.4f}')
+
+        torch.save(model, f'client_model_{client_id}.pt')
+        self.log_message("End Learning")
+
+    def get_updated_model(self, client_id, round):
+        msg = self.recv_file("global_model.pt")
+        if msg == "end":
+            return "end"
+        self.learn(client_id, round)
+        self.send_file(f"client_model_{client_id}.pt")
+        self.s.sendall("done learning\n".encode('utf-8'))
+
+    def run(self):
+        self.log_message("시작")
+        self.log_message(f"서버에 접속 중: {self.s.getpeername()}")
+        client_id = self.get_id()
+        round = 1
+        while True:
+            self.log_message(f"Round {round} start")
+            status = self.get_updated_model(client_id, round)
+            round += 1
+            if status == "end":
+                self.log_message("종료 코드 수신")
+                self.s.sendall("end".encode('utf-8'))
+                break
 
 
 if __name__ == "__main__":
-    run()
+    client = Client()
+    client.run()
