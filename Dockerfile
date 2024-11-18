@@ -4,6 +4,6 @@ WORKDIR /app
 
 COPY . /app
 
-# CMD [ "python", "client.py"]
+CMD [ "python", "-u", "client.py"]
 
-CMD ["tail", "-f", "/dev/null"]
+# CMD ["tail", "-f", "/dev/null"]
