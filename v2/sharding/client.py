@@ -186,7 +186,7 @@ class Client:
 
         return train_weight
 
-    def learn(self, client_id, round):
+    def learn(self, round):
         logger.info("Starting learning phase.")
         local_model = ComplexCNN(False)
         local_model.load_state_dict(torch.load('./global_model.pt'))
@@ -243,24 +243,25 @@ class Client:
                 f'Round {round} - Avg Loss: {avg_loss:.4f}, Accuracy: {accuracy:.4f}')
 
         model_parameters = self.get_layer_parameters(local_model, round)
-        torch.save(model_parameters, f'client_model_{client_id}.pt')
+        logging.info(f'test: {self.client_id}')
+        torch.save(model_parameters, f'client_model_{self.client_id}.pt')
         logger.info("Learning phase completed.")
 
-    def get_updated_model(self, client_id, round):
+    def get_updated_model(self, round):
         msg = self.recv_file("global_model.pt")
         if msg == "end":
             return "end"
-        self.learn(client_id, round)
-        self.send_file(f'client_model_{client_id}.pt')
+        self.learn(round)
+        self.send_file(f'client_model_{self.client_id}.pt')
         self.s.sendall("done learning\n".encode('utf-8'))
 
     def run(self):
         logger.info("Client is starting.")
-        client_id = self.get_id()
+        self.get_id()
         round = 1
         while True:
             logger.info(f"Starting round {round}")
-            status = self.get_updated_model(client_id, round)
+            status = self.get_updated_model(round)
             round += 1
             if status == "end":
                 logger.info("Termination signal received. Exiting.")
