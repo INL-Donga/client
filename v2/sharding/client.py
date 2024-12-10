@@ -113,6 +113,7 @@ class Client:
         self.connect_with_retries(max_retries, retry_interval)
         self.client_id = None  # 클라이언트 ID 초기화
         self.train_loader_sharded = None  # 샤딩된 데이터 로더 초기화
+        self.fileName = ""
 
     def connect_with_retries(self, max_retries, retry_interval):
         retries = 0
@@ -135,7 +136,9 @@ class Client:
         client_id = int(data)
         logger.info(f"Client ID received: {client_id}")
         self.client_id = client_id
-
+        self.fileName = 'client_model_{clientId}.pt'.format(
+            clientId=self.client_id)
+        logger.info('self.fileName={fileName}'.format(fileName=self.fileName))
         # 클라이언트 ID로 데이터셋 샤딩 설정
         train_dataset_sharded = get_sharded_dataset(
             train_dataset_CIFAR10, NUM_CLIENTS, self.client_id)
@@ -161,20 +164,21 @@ class Client:
         logger.info(f"File {file_name} received successfully.")
         return msg
 
-    def send_file(self, file_name):
+    def send_file(self):
         self.s.sendall("READY_TO_SEND_FILE\n".encode('utf-8'))
         msg = self.s.recv(1024).decode('utf-8')
         if msg == "ack":
-            with open(file_name, 'rb') as f:
-                file_size = os.path.getsize(file_name)
-                logger.info(
-                    f"Sending file {file_name}, size: {file_size} bytes")
+            with open(self.fileName, 'rb') as f:
+                file_size = os.path.getsize(self.fileName)
+                logger.info("Sending file {fileName}, size: {fileSize} bytes".format(
+                    fileName=self.fileName, fileSize=file_size))
                 self.s.sendall(file_size.to_bytes(8, byteorder='big'))
                 data = f.read(4096)
                 while data:
                     self.s.sendall(data)
                     data = f.read(4096)
-            logger.info(f"File {file_name} sent successfully.")
+            logger.info("File {fileName} sent successfully.".format(
+                fileName=self.fileName))
 
     def get_layer_parameters(self, model, round):
         if round % 2 == 0:
@@ -243,7 +247,7 @@ class Client:
                 f'Round {round} - Avg Loss: {avg_loss:.4f}, Accuracy: {accuracy:.4f}')
 
         model_parameters = self.get_layer_parameters(local_model, round)
-        torch.save(model_parameters, f'client_model_{client_id}.pt')
+        torch.save(model_parameters, self.fileName)
         logger.info("Learning phase completed.")
 
     def get_updated_model(self, client_id, round):
@@ -251,7 +255,7 @@ class Client:
         if msg == "end":
             return "end"
         self.learn(client_id, round)
-        self.send_file(f'client_model_{client_id}.pt')
+        self.send_file()
         self.s.sendall("done learning\n".encode('utf-8'))
 
     def run(self):
